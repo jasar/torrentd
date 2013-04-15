@@ -1,0 +1,175 @@
+#!/usr/local/bin/python
+
+import sys
+import time
+from daemon import Daemon
+import json
+from urlparse import urlparse
+from time import gmtime, strftime
+import subprocess
+import os
+from Xlib 
+
+import requests
+from bs4 import BeautifulSoup
+
+
+
+
+
+class Logger(object):
+	"""
+	Bunch of constant for logging.
+	"""
+
+	INFO = "INFO"
+	ERROR = "ERROR"
+
+	def __init__(self, log_file):
+		self.log_file = log_file
+
+	def log(self, msg_type, msg_title, **kwargs):
+		date_time = strftime("%Y-%m-%d %H:%M:%S", gmtime())
+		self.log_file.write(date_time + '\n')
+		self.log_file.write(msg_type + ": " + msg_title + '\n')
+
+		report = kwargs.get("report")
+		self.log_file.write(report + '\n' if report is not None else "")
+		self.log_file.write('\n')
+
+	def close(self):
+		self.log_file.close()
+
+
+def read_config(self, config_file, requires):
+	data = {}
+	if 'search_terms' in requires:
+		data['search_terms'] = []
+	if 'trackers' in requires:
+		data['trackers'] = []
+	if 'repeat_time' in requires:
+		data['repeat_time'] = 86400
+
+	for majorkey, subdict in config_file.iteritems():
+		if majorkey == "search_terms":
+			for search_term in subdict:
+				search_term = search_term.replace(' ', '+')
+				data['search_terms'].append(search_term)
+		elif majorkey == "trackers":
+			for tracker in subdict:
+				data['trackers'].append(tracker)
+		elif majorkey == "repeat_time":
+			repeat_time = subdict
+			data['repeat_time'] = repeat_time
+
+	return data
+
+
+def search(self, search_terms, trackers, log_file):
+	search_site = 'http://torrentz.eu'
+	logger = self.logger
+	trackerHelper = Tracker()
+
+	for search_term in search_terms:
+		search_results_response = BeautifulSoup(requests.get(search_site + '/search?f=' + search_term).text)
+		try:
+			div_result = search_results_response.find_all("div", class_ = 'results')[0]
+			torrent_list = div_result.find_all("dt")
+		except IndexError:
+				logger.log(logger.ERROR, "When doing lookup on 'search resulsts", report = "No DIV element with class=results")
+				logger.close()
+				self.stop()
+
+		for torrent in torrent_list:
+			torrent_details_link = torrent.a['href']
+			logger.log(logger.INFO, "Search list", report = torrent_details_link)
+
+			torrent_details_response = BeautifulSoup(requests.get(search_site + torrent_details_link).text)
+			try:
+				div_download = torrent_details_response.find_all("div", class_ = 'download')[0]
+				tracker_list = div_download.find_all("dt")
+			except IndexError:
+					logger.log(logger.ERROR, "When doing lookup on 'tracker list'.", report = "No DIV element with class=download.")
+					logger.close()
+					self.stop()
+
+			dl_link = None
+			for tracker in tracker_list:
+				tracker_link = tracker.a['href']
+				tracker_domain = urlparse(tracker_link).netloc
+
+				if len(tracker_domain) == 0:
+					continue
+				else:
+					for allowed_tracker in trackers:
+						if allowed_tracker in tracker_domain:
+							logger.log(logger.INFO, "Torrent page", report = tracker_link)
+
+							try:
+								trackerHelper.current_tracker = allowed_tracker
+								dl_link = trackerHelper.get_dl_link(tracker_link)
+								logger.log(logger.INFO, "Download link", report = dl_link)
+							except Exception as e:
+								msg_type, msg_title, report = e.args
+								logger.log(msg_type, msg_title, report = report)
+								logger.close()
+								self.stop()
+
+			if dl_link is not None:
+				open_torrent_client(dl_link)
+
+
+def open_torrent_client(dl_link):
+	if sys.platform.startswith('darwin'):
+		subprocess.call(('open', dl_link))
+	elif os.name == 'nt':
+		os.startfile(dl_link)
+	elif os.name == 'posix':
+		subprocess.call(('xdg-open', dl_link))
+
+
+def process(self):
+	try:
+		log_file = open(sys.argv[2] + '.log', 'a')
+		self.logger = Logger(log_file)
+		config_file = open(sys.argv[2])
+		config_json = json.load(config_file)
+		config_file.close()
+
+		data = read_config(self, config_json, ["search_terms", "trackers", "torrent_client"])
+		search(self, data["search_terms"], data["trackers"], log_file)
+
+		log_file.close()
+
+		return data['repeat_time']
+	except IOError:
+		print "Error"
+
+
+class MyDaemon(Daemon):
+	def run(self):
+		while True:
+			repeat_time = process(self)
+			time.sleep(repeat_time)
+
+if __name__ == "__main__":
+
+	daemon = MyDaemon('/tmp/bittorrentd.pid')
+
+	# DEBUG
+	# process(daemon)
+
+	if len(sys.argv) > 1:
+		if 'start' == sys.argv[1]:
+			daemon.start()
+		elif 'stop' == sys.argv[1]:
+			daemon.stop()
+		elif 'restart' == sys.argv[1]:
+			daemon.restart()
+		else:
+			print "Unknown command"
+			sys.exit(2)
+		sys.exit(0)
+	else:
+		print "usage: %s start config-file|stop|restart" % sys.argv[0]
+		sys.exit(2)
